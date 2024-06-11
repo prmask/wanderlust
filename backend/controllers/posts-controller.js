@@ -1,6 +1,7 @@
 import Post from '../models/post.js';
-import { validCategories } from '../utils/constants.js';
-
+import User from '../models/user.js';
+import { deleteDataFromCache, storeDataInCache } from '../utils/cache-posts.js';
+import { HTTP_STATUS, REDIS_KEYS, RESPONSE_MESSAGES, validCategories } from '../utils/constants.js';
 export const createPostHandler = async (req, res) => {
   try {
     const {
@@ -12,20 +13,28 @@ export const createPostHandler = async (req, res) => {
       isFeaturedPost = false,
     } = req.body;
 
+    const userId = req.user._id;
+
     // Validation - check if all fields are filled
     if (!title || !authorName || !imageLink || !description || !categories) {
-      return res.status(400).json({ message: 'All fields are required.' });
+      return res
+        .status(HTTP_STATUS.BAD_REQUEST)
+        .json({ message: RESPONSE_MESSAGES.COMMON.REQUIRED_FIELDS });
     }
 
     // Validation - check if imageLink is a valid URL
-    const imageLinkRegex = /\.(jpg|jpeg|png)$/i;
+    const imageLinkRegex = /\.(jpg|jpeg|png|webp)$/i;
     if (!imageLinkRegex.test(imageLink)) {
-      return res.status(400).json({ message: 'Image URL must end with .jpg, .jpeg, or .png' });
+      return res
+        .status(HTTP_STATUS.BAD_REQUEST)
+        .json({ message: RESPONSE_MESSAGES.POSTS.INVALID_IMAGE_URL });
     }
 
     // Validation - check if categories array has more than 3 items
     if (categories.length > 3) {
-      return res.status(400).json({ message: 'Please select up to three categories only.' });
+      return res
+        .status(HTTP_STATUS.BAD_REQUEST)
+        .json({ message: RESPONSE_MESSAGES.POSTS.MAX_CATEGORIES });
     }
 
     const post = new Post({
@@ -35,30 +44,42 @@ export const createPostHandler = async (req, res) => {
       description,
       categories,
       isFeaturedPost,
+      authorId: req.user._id,
     });
 
-    const savedPost = await post.save();
-    res.status(200).json(savedPost);
+    const [savedPost] = await Promise.all([
+      post.save(), // Save the post
+      deleteDataFromCache(REDIS_KEYS.ALL_POSTS), // Invalidate cache for all posts
+      deleteDataFromCache(REDIS_KEYS.FEATURED_POSTS), // Invalidate cache for featured posts
+      deleteDataFromCache(REDIS_KEYS.LATEST_POSTS), // Invalidate cache for latest posts
+    ]);
+
+    // updating user doc to include the ObjectId of the created post
+    await User.findByIdAndUpdate(userId, { $push: { posts: savedPost._id } });
+
+    res.status(HTTP_STATUS.OK).json(savedPost);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ message: err.message });
   }
 };
 
 export const getAllPostsHandler = async (req, res) => {
   try {
     const posts = await Post.find();
-    res.status(200).status(200).json(posts);
+    await storeDataInCache(REDIS_KEYS.ALL_POSTS, posts);
+    return res.status(HTTP_STATUS.OK).json(posts);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ message: err.message });
   }
 };
 
 export const getFeaturedPostsHandler = async (req, res) => {
   try {
     const featuredPosts = await Post.find({ isFeaturedPost: true });
-    res.status(200).json(featuredPosts);
+    await storeDataInCache(REDIS_KEYS.FEATURED_POSTS, featuredPosts);
+    res.status(HTTP_STATUS.OK).json(featuredPosts);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ message: err.message });
   }
 };
 
@@ -67,22 +88,25 @@ export const getPostByCategoryHandler = async (req, res) => {
   try {
     // Validation - check if category is valid
     if (!validCategories.includes(category)) {
-      return res.status(400).json({ message: 'Invalid category' });
+      return res
+        .status(HTTP_STATUS.BAD_REQUEST)
+        .json({ message: RESPONSE_MESSAGES.POSTS.INVALID_CATEGORY });
     }
 
     const categoryPosts = await Post.find({ categories: category });
-    res.status(200).json(categoryPosts);
+    res.status(HTTP_STATUS.OK).json(categoryPosts);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ message: err.message });
   }
 };
 
 export const getLatestPostsHandler = async (req, res) => {
   try {
     const latestPosts = await Post.find().sort({ timeOfPost: -1 });
-    res.status(200).json(latestPosts);
+    await storeDataInCache(REDIS_KEYS.LATEST_POSTS, latestPosts);
+    res.status(HTTP_STATUS.OK).json(latestPosts);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ message: err.message });
   }
 };
 
@@ -92,12 +116,12 @@ export const getPostByIdHandler = async (req, res) => {
 
     // Validation - check if post exists
     if (!post) {
-      return res.status(404).json({ message: 'Post not found' });
+      return res.status(HTTP_STATUS.NOT_FOUND).json({ message: RESPONSE_MESSAGES.POSTS.NOT_FOUND });
     }
 
-    res.status(200).json(post);
+    res.status(HTTP_STATUS.OK).json(post);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ message: err.message });
   }
 };
 
@@ -109,26 +133,44 @@ export const updatePostHandler = async (req, res) => {
 
     // Validation - check if post exists
     if (!updatedPost) {
-      return res.status(404).json({ message: 'Post not found' });
+      return res.status(HTTP_STATUS.NOT_FOUND).json({ message: RESPONSE_MESSAGES.POSTS.NOT_FOUND });
     }
 
-    res.status(200).json(updatedPost);
+    res.status(HTTP_STATUS.OK).json(updatedPost);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ message: err.message });
   }
 };
 
 export const deletePostByIdHandler = async (req, res) => {
   try {
-    const post = await Post.findByIdAndRemove(req.params.id);
+    const post = await Post.findByIdAndDelete(req.params.id);
 
     // Validation - check if post exists
     if (!post) {
-      return res.status(404).json({ message: 'Post not found' });
+      return res.status(HTTP_STATUS.NOT_FOUND).json({ message: RESPONSE_MESSAGES.POSTS.NOT_FOUND });
     }
+    await User.findByIdAndUpdate(post.authorId, { $pull: { posts: req.params.id } });
 
-    res.status(200).json({ message: 'Post deleted' });
+    res.status(HTTP_STATUS.OK).json({ message: RESPONSE_MESSAGES.POSTS.DELETED });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ message: err.message });
+  }
+};
+
+export const getRelatedPostsByCategories = async (req, res) => {
+  const { categories } = req.query;
+  if (!categories) {
+    return res
+      .status(HTTP_STATUS.NOT_FOUND)
+      .json({ message: RESPONSE_MESSAGES.POSTS.CATEGORIES_NOTFOUND });
+  }
+  try {
+    const filteredCategoryPosts = await Post.find({
+      categories: { $in: categories },
+    });
+    res.status(HTTP_STATUS.OK).json(filteredCategoryPosts);
+  } catch (err) {
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ message: err.message });
   }
 };

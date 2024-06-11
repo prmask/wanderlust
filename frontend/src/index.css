@@ -2,9 +2,11 @@
 @tailwind components;
 @tailwind utilities;
 
-@layer base {
-  :root {
-    --color-dark-background: #10172a;
-    --color-dark-textfield-card: #1d293c;
+@layer components {
+  .scale-hover {
+    transform: scale(1.12);
+  }
+  .scale-click {
+    transform: scale(0.95);
   }
 }
