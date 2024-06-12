@@ -1,28 +1,20 @@
-import express from 'express';
-import postsRouter from './routes/posts.js';
+import app from './app.js';
 import connectDB from './config/db.js';
-import cors from 'cors';
-import compression from 'compression';
-const app = express();
-const port = process.env.PORT || 5000;
+import { PORT } from './config/utils.js';
+import { connectToRedis } from './services/redis.js';
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(cors());
-app.use(compression());
+const port = PORT || 8080;
 
-// Connect to database
-connectDB();
+// Connect to redis
+connectToRedis();
 
-// API route
-app.use('/api/posts', postsRouter);
-
-app.get('/', (req, res) => {
-  res.send('Yay!! Backend of wanderlust app is now accessible ');
-});
-
-app.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
-});
-
-export default app;
+//Connect to Mongodb
+connectDB()
+  .then(() => {
+    app.listen(port, () => {
+      console.log(`Server is running on port ${port}`);
+    });
+  })
+  .catch((error) => {
+    console.log('MongoDB connection failed:', error);
+  });
